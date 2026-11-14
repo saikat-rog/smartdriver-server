@@ -69,8 +69,18 @@ adminRouter.get('/stats', (_req: AuthenticatedRequest, res: Response): void => {
     const rejectedStmt = db.prepare("SELECT COUNT(*) as count FROM drivers WHERE status = 'rejected'");
     const rejected = (rejectedStmt.get() as any).count;
 
-    const feePaidStmt = db.prepare('SELECT COUNT(*) as count, COALESCE(SUM(fee_amount), 0) as total_revenue FROM drivers WHERE fee_paid = 1');
-    const feeData = feePaidStmt.get() as any;
+    const draftStmt = db.prepare("SELECT COUNT(*) as count FROM drivers WHERE status = 'draft'");
+    const draft = (draftStmt.get() as any).count;
+
+    const revStmt = db.prepare(`
+      SELECT
+        COALESCE(SUM(CASE WHEN fee_paid = 1 THEN fee_amount ELSE 0 END + CASE WHEN subscription_paid = 1 THEN subscription_amount ELSE 0 END), 0) as total_revenue,
+        COUNT(CASE WHEN fee_paid = 1 THEN 1 END) as fee_paid_count,
+        COUNT(CASE WHEN subscription_paid = 1 THEN 1 END) as subscription_paid_count,
+        COUNT(CASE WHEN documents_submitted = 1 THEN 1 END) as docs_submitted_count
+      FROM drivers
+    `);
+    const revData = revStmt.get() as any;
 
     res.json({
       success: true,
@@ -79,8 +89,11 @@ adminRouter.get('/stats', (_req: AuthenticatedRequest, res: Response): void => {
         pending,
         approved,
         rejected,
-        fee_paid_count: feeData.count,
-        total_revenue: feeData.total_revenue,
+        draft,
+        fee_paid_count: revData.fee_paid_count,
+        subscription_paid_count: revData.subscription_paid_count,
+        docs_submitted_count: revData.docs_submitted_count,
+        total_revenue: revData.total_revenue,
       },
     });
   } catch (err: any) {
@@ -95,11 +108,15 @@ adminRouter.get('/applications', (req: AuthenticatedRequest, res: Response): voi
     const status = (req.query.status as string) || '';
     const search = (req.query.search as string) || '';
     const feePaid = req.query.fee_paid as string;
+    const subPaid = req.query.subscription_paid as string;
+    const docsSubmitted = req.query.documents_submitted as string;
 
     let query = `
       SELECT
-        id, phone, name, email, city, vehicle_category, vehicle_model, vehicle_number,
-        dl_number, status, fee_paid, fee_amount, fee_tx_id, fee_paid_at,
+        id, phone, name, email, city, vehicle_category, current_step,
+        status, fee_paid, fee_amount, fee_tx_id, fee_paid_at,
+        subscription_paid, subscription_amount, subscription_tx_id, subscription_paid_at,
+        documents_submitted, documents_submitted_at, admin_notes,
         created_at, updated_at
       FROM drivers
       WHERE 1=1
@@ -116,16 +133,24 @@ adminRouter.get('/applications', (req: AuthenticatedRequest, res: Response): voi
       params.push(feePaid === '1' || feePaid === 'true' ? 1 : 0);
     }
 
+    if (subPaid !== undefined && subPaid !== '') {
+      query += ' AND subscription_paid = ?';
+      params.push(subPaid === '1' || subPaid === 'true' ? 1 : 0);
+    }
+
+    if (docsSubmitted !== undefined && docsSubmitted !== '') {
+      query += ' AND documents_submitted = ?';
+      params.push(docsSubmitted === '1' || docsSubmitted === 'true' ? 1 : 0);
+    }
+
     if (search.trim()) {
       query += ` AND (
         name LIKE ? OR
         phone LIKE ? OR
-        vehicle_number LIKE ? OR
-        dl_number LIKE ? OR
-        city LIKE ?
+        vehicle_category LIKE ?
       )`;
       const searchPattern = `%${search.trim()}%`;
-      params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+      params.push(searchPattern, searchPattern, searchPattern);
     }
 
     query += ' ORDER BY id DESC';
@@ -144,7 +169,7 @@ adminRouter.get('/applications', (req: AuthenticatedRequest, res: Response): voi
   }
 });
 
-// Single Driver Application Details + Documents
+// Single Driver Application Details
 adminRouter.get('/applications/:id', (req: AuthenticatedRequest, res: Response): void => {
   try {
     const driverId = Number(req.params.id);
@@ -156,7 +181,6 @@ adminRouter.get('/applications/:id', (req: AuthenticatedRequest, res: Response):
       return;
     }
 
-    // Don't leak password hash to admin UI
     delete driver.password_hash;
 
     const getDocs = db.prepare('SELECT * FROM driver_documents WHERE driver_id = ?');
@@ -179,7 +203,7 @@ adminRouter.patch('/applications/:id/status', (req: AuthenticatedRequest, res: R
     const driverId = Number(req.params.id);
     const { status, admin_notes } = req.body;
 
-    const allowedStatus = ['submitted', 'under_review', 'action_required', 'approved', 'rejected'];
+    const allowedStatus = ['draft', 'submitted', 'under_review', 'action_required', 'approved', 'rejected'];
     if (!status || !allowedStatus.includes(status)) {
       res.status(400).json({
         success: false,
@@ -207,27 +231,58 @@ adminRouter.patch('/applications/:id/status', (req: AuthenticatedRequest, res: R
   }
 });
 
-// Mark / Update Fee Status
+// Mark / Update Fee & Subscription Status
 adminRouter.patch('/applications/:id/fee', (req: AuthenticatedRequest, res: Response): void => {
   try {
     const driverId = Number(req.params.id);
-    const { fee_paid, fee_tx_id } = req.body;
+    const { fee_paid, fee_tx_id, subscription_paid, subscription_tx_id } = req.body;
 
-    const paidVal = fee_paid ? 1 : 0;
-    const paidAt = paidVal ? new Date().toISOString() : null;
+    const updates: string[] = ['updated_at = datetime(\'now\')'];
+    const params: any[] = [];
+
+    if (fee_paid !== undefined) {
+      const paidVal = fee_paid ? 1 : 0;
+      updates.push('fee_paid = ?');
+      params.push(paidVal);
+      if (paidVal) {
+        updates.push('fee_paid_at = datetime(\'now\')');
+      }
+    }
+
+    if (fee_tx_id !== undefined) {
+      updates.push('fee_tx_id = ?');
+      params.push(fee_tx_id ? String(fee_tx_id).trim() : null);
+    }
+
+    if (subscription_paid !== undefined) {
+      const subVal = subscription_paid ? 1 : 0;
+      updates.push('subscription_paid = ?');
+      params.push(subVal);
+      if (subVal) {
+        updates.push('subscription_paid_at = datetime(\'now\')');
+      }
+    }
+
+    if (subscription_tx_id !== undefined) {
+      updates.push('subscription_tx_id = ?');
+      params.push(subscription_tx_id ? String(subscription_tx_id).trim() : null);
+    }
+
+    params.push(driverId);
 
     const updateStmt = db.prepare(`
       UPDATE drivers
-      SET fee_paid = ?, fee_tx_id = COALESCE(?, fee_tx_id), fee_paid_at = ?, updated_at = datetime('now')
+      SET ${updates.join(', ')}
       WHERE id = ?
     `);
+    updateStmt.run(...params);
 
-    updateStmt.run(paidVal, fee_tx_id || null, paidAt, driverId);
+    const driver = db.prepare('SELECT * FROM drivers WHERE id = ?').get(driverId);
 
     res.json({
       success: true,
-      message: `Application fee status updated to ${paidVal ? 'Paid' : 'Unpaid'}.`,
-      fee_paid: paidVal,
+      message: 'Payment and subscription status updated.',
+      driver,
     });
   } catch (err: any) {
     console.error('Admin update fee error:', err);
