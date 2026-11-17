@@ -1,9 +1,12 @@
 import { Cashfree, CFEnvironment } from 'cashfree-pg';
 import { db } from '../db.js';
 
-const isProduction = (process.env.CASHFREE_ENVIRONMENT || 'SANDBOX').toUpperCase() === 'PRODUCTION';
-const appId = process.env.CASHFREE_APP_ID || '';
-const secretKey = process.env.CASHFREE_SECRET_KEY || '';
+const envVar = (process.env.CASHFREE_ENVIRONMENT || '').trim().toUpperCase();
+const appId = (process.env.CASHFREE_APP_ID || '').trim();
+const secretKey = (process.env.CASHFREE_SECRET_KEY || '').trim();
+
+// Auto-detect production: explicitly set to PRODUCTION or using production-prefixed keys
+const isProduction = envVar === 'PRODUCTION' || secretKey.startsWith('cfsk_ma_prod_') || appId.startsWith('152');
 
 if (!appId || !secretKey) {
   console.warn('⚠️ CASHFREE_APP_ID or CASHFREE_SECRET_KEY is missing from environment variables.');
@@ -28,6 +31,10 @@ export interface CreateOrderParams {
 
 export async function createCashfreeOrder(params: CreateOrderParams) {
   const { driverId, phone, name, email, orderType, returnUrl } = params;
+
+  if (!appId || !secretKey) {
+    throw new Error('Cashfree credentials (CASHFREE_APP_ID / CASHFREE_SECRET_KEY) are missing in the server .env file.');
+  }
 
   // Strict server-side amount enforcement to prevent tampering
   const orderAmount = orderType === 'registration_fee' ? 3000.0 : 2000.0;
