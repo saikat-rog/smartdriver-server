@@ -210,6 +210,26 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_payments_driver_id ON payments(driver_id);
   `);
 
+  // System Settings Table (Dynamic Fees, Configuration)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS system_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
+  // Seed default fee settings if missing
+  const regFeeCheck = db.prepare('SELECT value FROM system_settings WHERE key = ?').get('registration_fee');
+  if (!regFeeCheck) {
+    db.prepare('INSERT INTO system_settings (key, value) VALUES (?, ?)').run('registration_fee', '3000');
+  }
+
+  const subFeeCheck = db.prepare('SELECT value FROM system_settings WHERE key = ?').get('subscription_fee');
+  if (!subFeeCheck) {
+    db.prepare('INSERT INTO system_settings (key, value) VALUES (?, ?)').run('subscription_fee', '2000');
+  }
+
   // Sync admin credentials from .env
   const adminUsername = (process.env.ADMIN_USERNAME || 'admin').trim();
   const adminPassword = process.env.ADMIN_PASSWORD || 'Admin@SmartDriver2026';
@@ -234,4 +254,28 @@ export function initDatabase() {
       console.log(`🔄 Admin credentials updated from .env: ${adminUsername}`);
     }
   }
+}
+
+export function getFeeSettings(): { registration_fee: number; subscription_fee: number } {
+  try {
+    const reg = db.prepare('SELECT value FROM system_settings WHERE key = ?').get('registration_fee') as any;
+    const sub = db.prepare('SELECT value FROM system_settings WHERE key = ?').get('subscription_fee') as any;
+    return {
+      registration_fee: reg && !isNaN(Number(reg.value)) ? Number(reg.value) : 3000,
+      subscription_fee: sub && !isNaN(Number(sub.value)) ? Number(sub.value) : 2000,
+    };
+  } catch {
+    return { registration_fee: 3000, subscription_fee: 2000 };
+  }
+}
+
+export function updateFeeSettings(registrationFee: number, subscriptionFee: number): { registration_fee: number; subscription_fee: number } {
+  const updateStmt = db.prepare(`
+    INSERT INTO system_settings (key, value, updated_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+  `);
+  updateStmt.run('registration_fee', String(registrationFee));
+  updateStmt.run('subscription_fee', String(subscriptionFee));
+  return getFeeSettings();
 }

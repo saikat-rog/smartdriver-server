@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { db } from '../db.js';
+import { db, getFeeSettings, updateFeeSettings } from '../db.js';
 import { AuthenticatedRequest, requireAdminAuth, JWT_SECRET } from '../middleware/auth.js';
 
 export const adminRouter = Router();
@@ -287,5 +287,51 @@ adminRouter.patch('/applications/:id/fee', (req: AuthenticatedRequest, res: Resp
   } catch (err: any) {
     console.error('Admin update fee error:', err);
     res.status(500).json({ success: false, message: 'Failed to update fee status.' });
+  }
+});
+
+// ==========================================
+// Platform Dynamic Fee Settings
+// ==========================================
+adminRouter.get('/settings/fees', (_req: AuthenticatedRequest, res: Response): void => {
+  try {
+    const fees = getFeeSettings();
+    res.json({
+      success: true,
+      ...fees,
+    });
+  } catch (err: any) {
+    console.error('Admin get fees error:', err);
+    res.status(500).json({ success: false, message: 'Failed to retrieve fee settings.' });
+  }
+});
+
+adminRouter.patch('/settings/fees', (req: AuthenticatedRequest, res: Response): void => {
+  try {
+    const { registration_fee, subscription_fee } = req.body;
+
+    const regNum = Number(registration_fee);
+    const subNum = Number(subscription_fee);
+
+    if (isNaN(regNum) || regNum < 1) {
+      res.status(400).json({ success: false, message: 'Registration fee must be a valid positive amount.' });
+      return;
+    }
+
+    if (isNaN(subNum) || subNum < 1) {
+      res.status(400).json({ success: false, message: 'Subscription fee must be a valid positive amount.' });
+      return;
+    }
+
+    const updated = updateFeeSettings(regNum, subNum);
+
+    res.json({
+      success: true,
+      message: `Fee settings updated: Registration Fee = ₹${regNum}, Subscription = ₹${subNum}`,
+      ...updated,
+    });
+  } catch (err: any) {
+    console.error('Admin update fees error:', err);
+    res.status(500).json({ success: false, message: 'Failed to update fee settings.' });
   }
 });

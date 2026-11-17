@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { db } from '../db.js';
+import { db, getFeeSettings } from '../db.js';
 import { AuthenticatedRequest, requireDriverAuth } from '../middleware/auth.js';
 import { documentUpload } from '../middleware/upload.js';
 import { createCashfreeOrder, verifyAndSettleOrder, verifyWebhookSignature } from '../services/cashfree.js';
@@ -305,6 +305,20 @@ driverRouter.post('/submit-documents', (req: Request, res: Response): void => {
 // ==========================================
 // Cashfree Payment Gateway Integration
 // ==========================================
+
+// Public endpoint to retrieve dynamic fees configured by admin
+driverRouter.get('/fee-settings', (_req: Request, res: Response): void => {
+  try {
+    const fees = getFeeSettings();
+    res.json({
+      success: true,
+      ...fees,
+    });
+  } catch (err: any) {
+    console.error('Fetch fee settings error:', err);
+    res.status(500).json({ success: false, registration_fee: 3000, subscription_fee: 2000 });
+  }
+});
 
 // Create a Cashfree Payment Order (Step 4 Registration Fee ₹3,000 or Step 5 Platform Subscription ₹2,000)
 driverRouter.post('/create-order', async (req: Request, res: Response): Promise<void> => {

@@ -1,5 +1,5 @@
 import { Cashfree, CFEnvironment } from 'cashfree-pg';
-import { db } from '../db.js';
+import { db, getFeeSettings } from '../db.js';
 
 const envVar = (process.env.CASHFREE_ENVIRONMENT || '').trim().toUpperCase();
 const appId = (process.env.CASHFREE_APP_ID || '').trim();
@@ -36,8 +36,9 @@ export async function createCashfreeOrder(params: CreateOrderParams) {
     throw new Error('Cashfree credentials (CASHFREE_APP_ID / CASHFREE_SECRET_KEY) are missing in the server .env file.');
   }
 
-  // Strict server-side amount enforcement to prevent tampering
-  const orderAmount = orderType === 'registration_fee' ? 3000.0 : 2000.0;
+  // Dynamic fee configuration from database (managed via Admin Panel)
+  const feeSettings = getFeeSettings();
+  const orderAmount = orderType === 'registration_fee' ? feeSettings.registration_fee : feeSettings.subscription_fee;
   const prefix = orderType === 'registration_fee' ? 'FEE' : 'SUB';
   const cleanPhone = String(phone).replace(/\D/g, '').slice(-10);
 
