@@ -3,3 +3,4 @@ dist/
 uploads/
 data/*.db*
 .env
+.agent/skills/cashfree-skills/

@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { db } from '../db.js';
 import { AuthenticatedRequest, requireDriverAuth } from '../middleware/auth.js';
 import { documentUpload } from '../middleware/upload.js';
+import { createCashfreeOrder, verifyAndSettleOrder, verifyWebhookSignature } from '../services/cashfree.js';
 
 export const driverRouter = Router();
 
@@ -298,6 +299,142 @@ driverRouter.post('/submit-documents', (req: Request, res: Response): void => {
   } catch (err: any) {
     console.error('Submit documents error:', err);
     res.status(500).json({ success: false, message: 'Failed to record document submission.' });
+  }
+});
+
+// ==========================================
+// Cashfree Payment Gateway Integration
+// ==========================================
+
+// Create a Cashfree Payment Order (Step 4 Registration Fee ₹3,000 or Step 5 Platform Subscription ₹2,000)
+driverRouter.post('/create-order', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { driverId, phone, name, email, order_type, return_url } = req.body;
+
+    if (!order_type || (order_type !== 'registration_fee' && order_type !== 'subscription')) {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid order_type. Must be "registration_fee" or "subscription".',
+      });
+      return;
+    }
+
+    const cleanPhone = phone ? String(phone).replace(/\D/g, '').slice(-10) : '';
+
+    let driver: any = null;
+    if (driverId) {
+      driver = db.prepare('SELECT * FROM drivers WHERE id = ?').get(Number(driverId));
+    }
+    if (!driver && cleanPhone) {
+      driver = db.prepare('SELECT * FROM drivers WHERE phone = ?').get(cleanPhone);
+    }
+
+    if (!driver) {
+      if (!cleanPhone || cleanPhone.length !== 10) {
+        res.status(400).json({
+          success: false,
+          message: 'Please provide a valid 10-digit mobile number to initiate payment.',
+        });
+        return;
+      }
+
+      // Create draft record so we have a persistent driver id for this transaction
+      const defaultStep = order_type === 'subscription' ? 5 : 4;
+      const ins = db.prepare(`
+        INSERT INTO drivers (phone, name, status, current_step, created_at, updated_at)
+        VALUES (?, ?, 'draft', ?, datetime('now'), datetime('now'))
+      `).run(cleanPhone, (name && String(name).trim()) || 'Applicant', defaultStep);
+
+      driver = db.prepare('SELECT * FROM drivers WHERE id = ?').get(ins.lastInsertRowid);
+    }
+
+    const orderResult = await createCashfreeOrder({
+      driverId: driver.id,
+      phone: driver.phone || cleanPhone,
+      name: driver.name || name,
+      email: driver.email || email,
+      orderType: order_type,
+      returnUrl: return_url,
+    });
+
+    res.json({
+      success: true,
+      driver_id: driver.id,
+      ...orderResult,
+    });
+  } catch (err: any) {
+    console.error('Create Cashfree order error:', err);
+    res.status(500).json({
+      success: false,
+      message: err.message || 'Failed to create payment order with Cashfree.',
+    });
+  }
+});
+
+// Verify payment status with Cashfree and update driver state
+driverRouter.post('/verify-payment', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { order_id } = req.body;
+
+    if (!order_id) {
+      res.status(400).json({ success: false, message: 'order_id is required for verification.' });
+      return;
+    }
+
+    const result = await verifyAndSettleOrder(String(order_id).trim());
+
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (err: any) {
+    console.error('Verify Cashfree payment error:', err);
+    res.status(500).json({
+      success: false,
+      message: err.message || 'Failed to verify payment status.',
+    });
+  }
+});
+
+// Cashfree Webhook Handler
+driverRouter.post('/cashfree-webhook', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const signature = (req.headers['x-webhook-signature'] as string) || '';
+    const timestamp = (req.headers['x-webhook-timestamp'] as string) || '';
+    const rawBody = (req as any).rawBody || (typeof req.body === 'string' ? req.body : JSON.stringify(req.body));
+
+    if (!signature || !timestamp) {
+      res.status(400).send('Missing webhook headers');
+      return;
+    }
+
+    const isValid = verifyWebhookSignature(signature, rawBody, timestamp);
+    if (!isValid) {
+      console.warn('⚠️ Webhook received with INVALID signature.');
+      res.status(400).send('Invalid signature');
+      return;
+    }
+
+    // Acknowledge Cashfree immediately with 200 OK
+    res.status(200).send('OK');
+
+    // Process event asynchronously
+    const payload = typeof req.body === 'object' ? req.body : JSON.parse(rawBody);
+    const eventType = payload.type || payload.event;
+    console.log(`🔔 Received Cashfree Webhook: ${eventType}`);
+
+    if (eventType === 'PAYMENT_SUCCESS_WEBHOOK') {
+      const orderId = payload.data?.order?.order_id;
+      if (orderId) {
+        await verifyAndSettleOrder(orderId);
+        console.log(`✅ Webhook verified & settled order ${orderId}`);
+      }
+    }
+  } catch (err: any) {
+    console.error('Error processing Cashfree webhook:', err);
+    if (!res.headersSent) {
+      res.status(500).send('Webhook processing error');
+    }
   }
 });
 

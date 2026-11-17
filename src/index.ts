@@ -19,7 +19,12 @@ app.use(cors({
   origin: '*',
   credentials: true,
 }));
-app.use(express.json({ limit: '15mb' }));
+app.use(express.json({
+  limit: '15mb',
+  verify: (req: any, _res, buf) => {
+    req.rawBody = buf.toString('utf8');
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 
 // Static files for uploaded documents

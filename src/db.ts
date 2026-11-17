@@ -188,6 +188,28 @@ export function initDatabase() {
     );
   `);
 
+  // Payments Table for Cashfree Transactions
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id TEXT UNIQUE NOT NULL,
+      driver_id INTEGER NOT NULL,
+      order_type TEXT NOT NULL,
+      order_amount REAL NOT NULL,
+      order_currency TEXT DEFAULT 'INR',
+      payment_session_id TEXT,
+      order_status TEXT DEFAULT 'ACTIVE',
+      cf_payment_id TEXT,
+      payment_method TEXT,
+      payment_time TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY(driver_id) REFERENCES drivers(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_payments_order_id ON payments(order_id);
+    CREATE INDEX IF NOT EXISTS idx_payments_driver_id ON payments(driver_id);
+  `);
+
   // Sync admin credentials from .env
   const adminUsername = (process.env.ADMIN_USERNAME || 'admin').trim();
   const adminPassword = process.env.ADMIN_PASSWORD || 'Admin@SmartDriver2026';
